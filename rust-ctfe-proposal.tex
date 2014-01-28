@@ -1,0 +1,273 @@
+\documentclass[a4paper,11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[american]{babel}
+\usepackage{url}
+\usepackage{lmodern}
+\usepackage{listings}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage[T1]{fontenc}
+\usepackage{textcomp}
+\usepackage{hyperref}
+
+\usepackage[top=2cm, bottom=3cm, left=3cm, right=3cm]{geometry}
+
+\lstset{language=C++,
+        basicstyle=\small\ttfamily,
+        keywordstyle=,
+        stringstyle=,
+        xleftmargin=1em,
+        showstringspaces=false,
+        commentstyle=\itshape\rmfamily,
+        columns=flexible,
+        keepspaces=true,
+        texcl=true
+}
+
+\hypersetup{colorlinks=true}
+
+%opening
+\title{Proposal to implement Compile-Time Function Evaluation in Rust\\
+\vspace{1em}
+\large{Mozilla Research Internship Program}
+}
+
+\author{Author: Pierre Talbot}
+
+\begin{document}
+\maketitle
+\begin{center}
+Latest PDF version available at \url{hyc.io/rust-ctfe-proposal.pdf}\\
+Latex source available at \url{https://github.com/ptal/rust-ctfe-proposal}
+\end{center}
+\abstract{}
+
+\tableofcontents
+\newpage
+\section{Introduction}
+
+Compile-time function evaluation (CTFE) is a special case of partial function evaluation\cite{PE} and more generally of supercompilation\cite{Turchin86theconcept}. It also can be viewed as a full constant propagation optimization. It is successfully used in recent languages such as D\cite{D_CTFE} or C++11\cite{DosReis:2010:GCE:1774088.1774537} and we will focus in this proposal on how to add it to Rust.
+
+In section \ref{optimistic-ctfe}, we discuss whether or not CTFE should be optimistic. We then introduce new syntax attributes and context semantic in section \ref{ctfe-context}. The CTFE implementation can be decomposed in two key steps, the section \ref{ctfe-requirements} outlines some eligibility requirements for a function call and section \ref{ctfe-evaluation} discusses an evaluation algorithm. In section \ref{impact-rust-compiler} and \ref{impact-type} we briefly show the impact of CTFE on the compiler internal and on the type system. Finally we discuss the further improvements in section \ref{further-work} and the related work in section \ref{related-work}.
+
+\section{Syntax and semantic}
+
+\subsection{Optimistic CTFE}
+\label{optimistic-ctfe}
+
+Optimistic CTFE decides whether we should try to perform CTFE for every function calls in the source-code or if we should enable this only when explicitly requested by the user. This seem to be an attractive optimization but it has two major disadvantages:
+
+\begin{itemize}
+\item \textbf{Halting problem} We must bound the computation in memory, time or number of operations so the compilation might fail even if the program is correct. Moreover, there are programs (such as server) designed to never stop.
+\item \textbf{Slow compilation} In medium to large program, the compilation may become really slow.
+\end{itemize}
+
+Our only option seems to activate optimistic CTFE on request, for example with a compiler option to enable the full program optimization. We could also provide special constructions to optimize only a part of a program (for which the programmer knows there isn't infinite recursion). Another possibility (such in D or C++) is to not provide optimistic CTFE at all.
+
+\subsection{CTFE context}
+\label{ctfe-context}
+
+Whenever we decide to use optimistic or "on-request" CTFE, the programmer might want to be sure the CTFE is achieved (without having to look at the assembly code). For this reason we need to define in which contexts CTFE is required. Here a non-exhaustive list (you can substitute the hole \lstinline{[]} with any compile-time value):
+
+\begin{itemize}
+\item Literal types
+\item Immutable static: \lstinline[mathescape]{"static" ident ':' type '=' [] ';'}
+\item Vector expressions: \lstinline[mathescape]{'[' expr ',' ".." [] ']'}
+\end{itemize}
+
+The immutable static fits well and allow us to not introduce a new keyword. This keyword might be sufficient for any use. Note that unlike C++ we decide if a function must be evaluate on the call-site, see section \ref{related-work} for a discussion on C++ and D strategies. However, what if, for some reasons, a function should not be computed by the compiler? For example, some computations may rely on specific floating point model, endianness or any machine-dependent code and so might behave differently at compile-time or run-time. The \href{http://static.rust-lang.org/doc/master/rust.html#attributes}{attributes} seem to be a perfect option for such a feature. The \href{http://static.rust-lang.org/doc/master/rust.html#inline-attributes}{inline attributes} are already a compiler-related optimization so we might follow the existing model:
+
+\begin{itemize}
+\item \lstinline{#[ctfe]} hints the compiler to perform CTFE.
+\item \lstinline{#[ctfe(always)]} asks the compiler to always perform CTFE resulting in a compiler error if it's impossible.
+\item \lstinline{#[ctfe(never)]} asks the compiler to never perform CTFE resulting in a compiler error if this function is called in a CTFE context.
+\end{itemize}
+
+This notation could be sufficient but we feel that others compiler optimization could appear later so a more uniform layout could be useful:
+
+\begin{itemize}
+\item \lstinline{#[enable(optimization-name, options list)]} hints the compiler to perform the optimizations listed.
+\item \lstinline{#[ensure(optimization-name, options list)]} asks the compiler to always perform the optimization listed and to abort compilation if it cannot be realized.
+\item \lstinline{#[disable(optimization-name, options list)]} asks the compiler to never perform the optimization listed.
+\end{itemize}
+
+The option list might be interesting in our case, we could pass some parameters bounding the computation in term of resources (memory, time or a number of operations).
+
+\subsection{Relation with pure function}
+\label{relation-pure}
+
+A pure function is a function that is free of side-effects, you can call a pure function any number of time with the same set of inputs and be sure the results will be identical. An observation is that if a function meets the requirements of CTFE it must be a pure function, but a pure function doesn't necessarily meet the requirements of CTFE. It mostly depends on the language, for example, in Rust, a pure function can contain unsafe blocks but the CTFE requirements doesn't allow that.
+
+\subsection{Relation with macro}
+\label{relation-macro}
+
+A macro is also a compile-time structure but is quite different from CTFE. A macro aimed to generate Rust code with a domain specific language (a macro language) and is executed before any compilations of Rust code. The functions eligible for CTFE are written in Rust and so will be compiled by the Rust compiler. That's also mean we can use CTFE inside macro.
+
+\section{Algorithms}
+
+\subsection{CTFE requirements}
+\label{ctfe-requirements}
+
+A function call meets the requirements of CTFE if:
+
+\begin{enumerate}
+\item Its parameters are evaluable at compile-time.
+\item It isn't a \href{http://static.rust-lang.org/doc/master/rust.html#diverging-functions}{diverging function}.
+\item It isn't an \href{http://static.rust-lang.org/doc/master/rust.html#unsafe-functions}{unsafe function}.
+\item It doesn't contain \href{http://static.rust-lang.org/doc/master/rust.html#unsafe-blocks}{unsafe block}.
+\item It doesn't perform I/O actions.
+\item The function source code is available to the compiler. It mustn't be in an \href{http://static.rust-lang.org/doc/master/rust.html#external-blocks}{external block}, however it can be an \href{http://static.rust-lang.org/doc/master/rust.html#extern-functions}{extern function}.
+\end{enumerate}
+
+Some of these restrictions may be partially relaxed (especially the \lstinline{unsafe} restriction) if we feel it's possible to execute CTFE within this subset.
+
+Adding a \lstinline{is_ctfe} function is mainly a matter of checking if the AST of the expression meets these requirements. In case of recursion we also need a \textit{memoization} table which retain (by the name) which functions have already been tested.
+
+Practically speaking, we would have a function \lstinline{is_ctfe(ast,env)} taking the AST representation of an expression and the environment.
+
+\subsection{Evaluation of compile-time function}
+\label{ctfe-evaluation}
+
+Once we know a function can be computed at compile-time, we need to execute it. Generally speaking, the research area of such execution inside compiler is known as multi-stage language\cite{DBLP:conf/gpce/CalcagnoTHL03,DBLP:conf/dagstuhl/Taha03}. A first and incomplete sketch of what the algorithm\footnote{This is not in Rust, consider it as pseudo-code.} would look like is (error handling not shown):
+
+\begin{lstlisting}
+fn evaluate(function_call, env) -> expr
+{
+  // Retreive free variables inside the function.
+  let fv = free_variables(function_call);
+
+  // Lookup the expressions of these free variables.
+  let fv_expressions = lookup_fv(fv, env);
+
+  // Recursively evaluate the expressions.
+  let fv_values = evaluate_expressions(fv_expressions, env);
+
+  // Lookup the function calls.
+  let fun_calls = lookup_fun_calls(function_call, fv_values, env);
+
+  // Recursively evaluate the nested function calls.
+  let fun_results = fun_calls.map(|(store, fun)| (store, evaluate(fun, env)));
+
+  // Create a sub program.
+  // NOTE: the make\_subprogram must annotate the function
+  // to disable CTFE, otherwise the compiler would do the same thing again.
+  let sub_program_ast = make_subprogram(fv_values, fun_results, function_call);
+
+  // Launch the compilation of this program.
+  compile(sub_program_ast, "temp");
+
+  // Run the program and retrieve the result.
+  let result = run("temp");
+
+  // Clean and return.
+  clean("temp");
+  return result;
+}
+\end{lstlisting}
+
+Since the CTFE function are pure, we could add a memoization table taking the function name and parameters as the key and the result as the value. But it might not be so useful in practice, we'd need to discuss about this.
+
+\section{Impact on the Rust compiler}
+\label{impact-rust-compiler}
+
+This section investigates which are the files or more generally speaking, the modules of the Rust compiler that will be involved\footnote{This is a really rough approximation of what I'd expect looking at the Rust compiler layout, I have no experience in this project.}. This is summarized in the table \ref{rust-changes}.
+\newline
+
+\begin{table}[h!]
+\begin{tabular}{| l | l |} \hline 
+\multicolumn{1}{|c|}{\textbf{Module name}} & \multicolumn{1}{|c|}{\textbf{Usage}} \\ \hline
+\multicolumn{2}{|c|}{Add attributes} \\ \hline
+libsyntax & Modification \\ \hline
+\multicolumn{2}{|c|}{CTFE requirements test} \\ \hline
+libsyntax & read-only \\ \hline
+librustc/middle & Add specific files \\ \hline
+\multicolumn{2}{|c|}{CTFE algorithm} \\ \hline
+libsyntax & read-only \\ \hline
+librustc/middle & Add specific files \\ \hline
+\end{tabular}
+\centering
+\caption{Rust compiler modules involved in CTFE.}
+\label{rust-changes}
+\end{table}
+
+\section{Impact on type system}
+\label{impact-type}
+
+By allowing loops or recursion, our type system becomes undecidable. The usual techniques (notably implemented by the C++ compiler to handle template recursion) is to bound the recursion depth or the loop iteration to some arbitrary values.
+
+\section{Further work}
+\label{further-work}
+
+We said in the introduction that CTFE was a specific case of partial evaluation\cite{PE}, we can briefly explain this with an example:
+
+\begin{lstlisting}
+fn square_sum(a: int, b: int) -> int
+{
+  return a*a + b*b;
+}
+
+fn main()
+{
+  let mut stdin = BufferedReader::new(stdin());
+  let line = stdin.read_line().unwrap_or(~"9");
+  let lineBytes = line.trim_right_chars(&'\n').as_bytes();
+  let integer = std::int::parse_bytes(lineBytes, 10).unwrap_or(9);
+  println!("{}", square_sum(integer, 8));
+}
+\end{lstlisting}
+
+Assuming that $8$ won't be constant propagated (to keep the example simple), the computation \lstinline{b*b} would be computed at run-time. Our CTFE definition wouldn't handle this case because \lstinline{a} is not a constant parameter (see the section \ref{ctfe-requirements}). The partial evaluation would correctly work by computing the square of $b$ at the compilation.
+\newline
+
+The domain of supercompilation is maybe the most ambitious optimization, some works have been done on the Haskell compiler\cite{Bolingbroke:2010:SE:2088456.1863540}. It can achieve strictly more optimizing transformations than partial evaluation\cite{Sorensen94towardsunifying}.
+
+\section{Related work}
+\label{related-work}
+
+C++11 introduced \textit{general constant expression} \cite{DosReis:2010:GCE:1774088.1774537} through \textit{literal types} and \textit{constexpr function} definitions. This definition of CTFE is Turing-complete but is using a subset of C++, for example you cannot declare local variables nor loops (note that recursion is allowed). As it is designed, it imposes to declare functions with the keyword \lstinline{constexpr} so most of the STL or other libraries is unusable. Doing so also imposed a lot of corrections in existing code (especially if you are a library writer) because you must annotate every functions with \lstinline{constexpr} to enable CTFE. However you can ensure that a function will be evaluated at compile-time by retrieving the result inside a \lstinline{constexpr} variable. Here an example from \cite{DosReis:2010:GCE:1774088.1774537}:
+
+\begin{lstlisting}
+constexpr int isqrt_helper(int sq, int d, int a) {
+  return sq <= a ? isqrt_helper(sq+d,d+2,a) : d;
+}
+
+constexpr int isqrt(int x) {
+  return isqrt_helper(1,3,x)/2 - 1;
+}
+\end{lstlisting}
+
+Some may argue that \lstinline{constexpr} could be automatically inferred by the compiler. Note that you won't introduce code duplication because a \lstinline{constexpr} function can be called with run time arguments and so be executed at run time.
+\newline
+
+In D, CTFE only depends on the calling context, that's mean a function will be evaluated at compile time if it's required by the context. Instead of the library designer having to think about CTFE, it's the responsibility of the user to do so. The advantages over \lstinline{constexpr} are:
+
+\begin{enumerate}
+\item to allow the use of existing libraries without forcing them to be explicitly annotated;
+\item to extends CTFE definition to nearly any language constructs (we do not specify what is allowed but what is disallowed).
+\end{enumerate}
+
+Here an example from the D documentation\cite{D_CTFE}:
+
+\begin{lstlisting}
+int square(int i) {
+  return i * i;
+}
+
+void foo() {
+  static j = square(3);     // compile time
+}
+\end{lstlisting}
+
+\section{Acknowledgment}
+
+This proposal wouldn't exist without the internship suggestion of Mozilla, while writing this, I already learned a lot of new things.
+
+\section{Conclusion}
+
+This proposal outlines some of the possible ways CTFE could be integrated inside the Rust language. We already have the keyword \lstinline{static} to force the CTFE optimization. A potential addendum are the attributes to force or disallow CTFE. We roughly sketched the algorithms and the impact on the Rust compiler. Finally, we discussed the further improvements and the related works. Some points should be clarified but we already have a decent base for a discussion in the Rust mailing-list.
+
+\newpage
+\bibliography{references}{}
+\bibliographystyle{plain}
+
+\end{document}
