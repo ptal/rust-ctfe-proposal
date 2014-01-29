@@ -78,7 +78,7 @@ Whenever we decide to use optimistic or "on-request" CTFE, the programmer might 
 The immutable static fits well and allow us to not introduce a new keyword. This keyword might be sufficient for any use. Note that unlike C++ we decide if a function must be evaluate on the call-site, see section \ref{related-work} for a discussion on C++ and D strategies. However, what if, for some reasons, a function should not be computed by the compiler? For example, some computations may rely on specific floating point model, endianness or any machine-dependent code and so might behave differently at compile-time or run-time. The \href{http://static.rust-lang.org/doc/master/rust.html#attributes}{attributes} seem to be a perfect option for such a feature. The \href{http://static.rust-lang.org/doc/master/rust.html#inline-attributes}{inline attributes} are already a compiler-related optimization so we might follow the existing model:
 
 \begin{itemize}
-\item \lstinline{#[ctfe]} hints the compiler to perform CTFE.
+\item \lstinline{#[ctfe]} hints the compiler that performing CTFE outside of the contexts (as specified) is safe. It means that for any input this function will terminate [in a reasonable amount of time and memory].
 \item \lstinline{#[ctfe(always)]} asks the compiler to always perform CTFE resulting in a compiler error if it's impossible.
 \item \lstinline{#[ctfe(never)]} asks the compiler to never perform CTFE resulting in a compiler error if this function is called in a CTFE context.
 \end{itemize}
@@ -92,11 +92,18 @@ This notation could be sufficient but we feel that others compiler optimization 
 \end{itemize}
 
 The option list might be interesting in our case, we could pass some parameters bounding the computation in term of resources (memory, time or a number of operations).
+\newline
+
+A different approach could be to change the semantic of \lstinline{#[ctfe]} to mimic the C++ \lstinline{constexpr} keyword:
+
+\begin{itemize}
+\item \lstinline{#[ctfe]} hints the compiler that this function is eligible for CTFE. A function non-annotated cannot be used as a CTFE candidate.
+\end{itemize}
 
 \subsection{Relation with pure function}
 \label{relation-pure}
 
-A pure function is a function that is free of side-effects, you can call a pure function any number of time with the same set of inputs and be sure the results will be identical. An observation is that if a function meets the requirements of CTFE it must be a pure function, but a pure function doesn't necessarily meet the requirements of CTFE. It mostly depends on the language, for example, in Rust, a pure function can contain unsafe blocks but the CTFE requirements doesn't allow that.
+A pure function is a function that is free of side-effects, you can call a pure function any number of time with the same set of inputs and be sure the results will be identical. An observation is that if a function meets the requirements of CTFE it must be a pure function, but a pure function doesn't necessarily meet the requirements of CTFE. It mostly depends on the language, for example, in Rust, a pure function may contain unsafe blocks, external calls or diverging but the CTFE requirements doesn't allow that.
 
 \subsection{Relation with macro}
 \label{relation-macro}
@@ -117,9 +124,10 @@ A function call meets the requirements of CTFE if:
 \item It doesn't contain \href{http://static.rust-lang.org/doc/master/rust.html#unsafe-blocks}{unsafe block}.
 \item It doesn't perform I/O actions.
 \item The function source code is available to the compiler. It mustn't be in an \href{http://static.rust-lang.org/doc/master/rust.html#external-blocks}{external block}, however it can be an \href{http://static.rust-lang.org/doc/master/rust.html#extern-functions}{extern function}.
+\item It doesn't call functions that don't meet the CTFE requirements.
 \end{enumerate}
 
-Some of these restrictions may be partially relaxed (especially the \lstinline{unsafe} restriction) if we feel it's possible to execute CTFE within this subset.
+Some of these restrictions may be partially relaxed (especially the \lstinline{unsafe} restriction) if we feel it's possible to execute CTFE within this subset. Some of the requirements may overlap, for example the I/O restriction is a subset of the external block restriction because, in Rust, I/O are implemented through calls to \lstinline{std::libc}.
 
 Adding a \lstinline{is_ctfe} function is mainly a matter of checking if the AST of the expression meets these requirements. In case of recursion we also need a \textit{memoization} table which retain (by the name) which functions have already been tested.
 
