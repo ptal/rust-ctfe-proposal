@@ -109,6 +109,9 @@ A pure function is a function that is free of side-effects, you can call a pure 
 \label{relation-macro}
 
 A macro is also a compile-time structure but it is quite different from CTFE. A macro aims to generate Rust code with a domain specific language (a macro language) and is executed before the compilation of Rust code. The functions eligible for CTFE are written in Rust and so will be compiled by the Rust compiler. That also means we can use CTFE inside a macro.
+\newline
+
+The new procedural macros are a very suited construction and could work well with or even replace CTFE. This will be studied in further version of this document.
 
 \section{Algorithms}
 
